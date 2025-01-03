@@ -157,7 +157,7 @@ class RandomForest:
     """
     A class representing a Random Forest model.
     """
-    def __init__(self, n_estimators=100, max_depth=None, min_samples_split=2, n_features=None, bagging=True, split_criterion='gini'):
+    def __init__(self, n_estimators=100, max_depth=10, min_samples_split=2, n_features=None, bagging=True, split_criterion='gini'):
         self.n_estimators = n_estimators            # Number of trees in the forest
         self.max_depth = max_depth                  # Maximum depth of each tree
         self.min_samples_split = min_samples_split  # Minimum number of samples required to split
