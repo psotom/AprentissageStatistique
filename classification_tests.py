@@ -68,8 +68,8 @@ def get_custom_rf_variations():
     Adjust or add more as needed.
     """
     variations = {
-        'RF_default': RandomForest(n_estimators=10, max_depth=10, min_samples_split=2, n_features=None, bagging=True, split_criterion='gini'),
-        'RF_simple': RandomForest(n_estimators=10, max_depth=10, min_samples_split=2, n_features=None, bagging=False, split_criterion='middle')
+        'RF_default': RandomForestClassifier(n_estimators=10, max_depth=10, min_samples_split=2, n_features=None, bagging=True, split_criterion='gini'),
+        'RF_simple': RandomForestClassifier(n_estimators=10, max_depth=10, min_samples_split=2, n_features=None, bagging=False, split_criterion='middle')
     }
     return variations
 
@@ -81,7 +81,7 @@ def run_experiments(
     datasets, 
     rf_variations, 
     cv_splits=5, 
-    results_file="classification_results.csv"
+    results_file="classification_results2.csv"
 ):
     """
     Runs Stratified K-Fold cross-validation for each dataset
