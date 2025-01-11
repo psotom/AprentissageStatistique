@@ -24,18 +24,30 @@ class BaseDecisionTree(metaclass=abc.ABCMeta):
       - _leaf_value(...)
     """
 
-    def __init__(self, max_depth=10, min_samples_split=2, n_features=None, split_criterion=None):
+    def __init__(
+        self,
+        max_depth=10,
+        min_samples_split=2,
+        n_features=None,
+        split_criterion=None,
+    ):
+
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
         self.n_features = n_features
         self.root = None
         self.split_criterion = split_criterion
 
-    def fit(self, X, y):
+    def fit(self, X, y, oob_X=None, oob_y=None):
         """
         Build the decision tree.
         """
         # If n_features is not specified, consider all features
+        self.cuts = np.zeros(X.shape[1])
+        self.total_cuts = 0
+        self.oob_X = oob_X
+        self.oob_y = oob_y
+        self.probs = None
         self.n_features = X.shape[1] if not self.n_features else min(self.n_features, X.shape[1])
         self.root = self._build_tree(X, y)
 
@@ -59,7 +71,6 @@ class BaseDecisionTree(metaclass=abc.ABCMeta):
 
         # Select random subset of features
         feat_idxs = np.random.choice(num_features, self.n_features, replace=False)
-
         # Find the best feature and threshold to split
         best_feat, best_thresh = self._select_split(X, y, feat_idxs)
 
@@ -68,6 +79,8 @@ class BaseDecisionTree(metaclass=abc.ABCMeta):
             leaf_value = self._leaf_value(y)
             return Node(value=leaf_value)
 
+        self.cuts[best_feat] += 1
+        self.total_cuts += 1
         # Otherwise, split and recurse
         left_idxs, right_idxs = self._split(X[:, best_feat], best_thresh)
         left = self._build_tree(X[left_idxs], y[left_idxs], depth + 1)
@@ -221,11 +234,10 @@ class DecisionTreeRegressor(BaseDecisionTree):
     def _select_split(self, X, y, feat_idxs):
         """Select a splitting feature and threshold. Gini or middle.
         """
-
         if self.split_criterion == 'mse':
             best_feat, best_thresh = self._mse_split(X, y, feat_idxs)
         elif self.split_criterion == 'middle':
-            best_feat, best_thresh = self._middle_split(X, y, feat_idxs)
+            best_feat, best_thresh = self._oob_middle_split(X, y, feat_idxs)
         else:
             raise ValueError(f"Unknown split criterion {self.split_criterion}")
         
@@ -234,8 +246,83 @@ class DecisionTreeRegressor(BaseDecisionTree):
             if len(left_idxs) == 0 or len(right_idxs) == 0:
                 best_feat = None
 
+        
         return best_feat, best_thresh
     
+    def _compute_probs_oob(self):
+        if self.oob_X is None or self.oob_y is None:
+            return
+        
+        # Compute the parent MSE using OOB data
+        parent_mse = self._mse(self.oob_y)
+        
+        # For each feature, compute MSE gain on OOB data if we split at the middle
+        gains = []
+        for feature_idx in range(self.oob_X.shape[1]):
+            
+            X_oob_col = self.oob_X[:, feature_idx]
+            if self.oob_X.size == 0:
+                gains.append(0.0)
+                continue
+
+            min_val, max_val = X_oob_col.min(), X_oob_col.max()
+
+            if min_val == max_val:
+                gains.append(0.0)
+                continue
+            
+            threshold = (min_val + max_val) / 2.0 # middle split
+
+            left_oob_idxs = np.argwhere(X_oob_col <= threshold).flatten()
+            right_oob_idxs = np.argwhere(X_oob_col > threshold).flatten()
+
+            if len(left_oob_idxs) == 0 or len(right_oob_idxs) == 0:
+                # No valid split
+                gains.append(0.0)
+                continue
+
+            gain = self._split_gain(self.oob_y, left_oob_idxs, right_oob_idxs, parent_mse)
+            gains.append(gain)
+
+        self.probs = np.array(gains)
+        
+    
+    def _oob_middle_split(self, X, y, features):
+        """
+        Pick a feature with probability proportional to the MSE reduction on OOB data,
+        then split at the middle of that feature's OOB range.
+        """
+        
+        if self.oob_X is None or self.oob_y is None:
+            return self._middle_split(X, y, features)
+        
+
+        if self.probs is None:
+            self._compute_probs_oob()
+        
+        probs_node = np.zeros_like(self.probs) - np.inf
+        probs_node[features] = self.probs[features]
+        probs_node = probs_node / max(max(probs_node), 1e-6)
+        probs = np.exp(probs_node) / sum(np.exp(probs_node))
+
+        if np.isnan(probs).any():
+            print("There are NaN probabilities")
+            print(probs_node)
+            print(self.probs[features])
+
+        valid = False
+        counter = 0
+        while not valid and counter < 10:
+            chosen_idx = np.random.choice(len(self.probs), p=probs)
+            X_column = X[:, chosen_idx]
+            min_value, max_value = X_column.min(), X_column.max()
+            if min_value != max_value:
+                valid = True  # Cannot split further
+            threshold = (min_value + max_value) / 2
+            counter += 1
+        
+        return chosen_idx, threshold
+
     def _middle_split(self, X, y, features):
         """
         Split at the middle of the feature's range.
@@ -287,7 +374,7 @@ class DecisionTreeRegressor(BaseDecisionTree):
 
         mse_left = self._mse(y_left)
         mse_right = self._mse(y_right)
-        child_mse = (n_left / n)*mse_left + (n_right / n)*mse_right
+        child_mse = (n_left / n) * mse_left + (n_right / n) * mse_right
         gain = parent_mse - child_mse
         return gain
 
@@ -308,7 +395,7 @@ class DecisionTreeRegressor(BaseDecisionTree):
 #           ABSTRACT BASE RANDOM FOREST
 # ===================================================
 
-class BaseRandomForest(metaclass=abc.ABCMeta):
+class MyBaseRandomForest(metaclass=abc.ABCMeta):
     """
     Abstract base class for a Random Forest.
     Holds the common code for building multiple trees, bagging, etc.
@@ -329,6 +416,7 @@ class BaseRandomForest(metaclass=abc.ABCMeta):
         self.n_estimators = n_estimators            # Number of trees in the forest
         self.max_depth = max_depth                  # Maximum depth of each tree
         self.min_samples_split = min_samples_split  # Minimum number of samples required to split
+        self.n_features_type = n_features
         self.n_features = n_features                # Number of features to consider when looking for the best split
         self.bagging = bagging                      # Whether to use bagging
         self.split_criterion = split_criterion      # Splitting criterion ('gini' or 'middle')
@@ -338,17 +426,25 @@ class BaseRandomForest(metaclass=abc.ABCMeta):
         """
         Build the forest of trees.
         """
+        if self.n_features_type == "sqrt":
+            self.n_features = int(np.sqrt(X.shape[1])) + 1
+
         self.trees = []
         for _ in range(self.n_estimators):
             if self.bagging:
                 idxs = np.random.choice(len(X), len(X), replace=True)
                 X_sample, y_sample = X[idxs], y[idxs]
+                unique_inbag_idxs = np.unique(idxs)
+                oob_mask = np.ones(len(X), dtype=bool)
+                oob_mask[unique_inbag_idxs] = False
+
+                oob_X, oob_y = X[oob_mask], y[oob_mask]
             else:
                 X_sample, y_sample = X, y
-
+                oob_X, oob_y = None, None
             # Create a new tree (classifier or regressor)
             tree = self._create_tree()
-            tree.fit(X_sample, y_sample)
+            tree.fit(X_sample, y_sample, oob_X=oob_X, oob_y=oob_y)
             self.trees.append(tree)
 
     def predict(self, X):
@@ -359,7 +455,10 @@ class BaseRandomForest(metaclass=abc.ABCMeta):
         all_preds = np.array([tree.predict(X) for tree in self.trees])
         # all_preds.shape => (n_estimators, n_samples)
         return self._aggregate_predictions(all_preds)
-
+    
+    def get_cut_probs(self):
+        return np.stack([tree.cuts / tree.total_cuts for tree in self.trees])
+    
     @abc.abstractmethod
     def _create_tree(self):
         """
@@ -381,7 +480,7 @@ class BaseRandomForest(metaclass=abc.ABCMeta):
 #       RANDOM FOREST CLASSIFIER (INHERIT)
 # ===================================================
 
-class RandomForestClassifier(BaseRandomForest):
+class MyRandomForestClassifier(MyBaseRandomForest):
     """
     Random Forest for classification, inherits from BaseRandomForest.
     """
@@ -409,13 +508,15 @@ class RandomForestClassifier(BaseRandomForest):
         # For each sample, pick the most common label
         y_pred = [Counter(sample).most_common(1)[0][0] for sample in all_preds]
         return np.array(y_pred)
+    
+
 
 
 # ===================================================
 #       RANDOM FOREST REGRESSOR (INHERIT)
 # ===================================================
 
-class RandomForestRegressor(BaseRandomForest):
+class MyRandomForestRegressor(MyBaseRandomForest):
     """
     Random Forest for regression, inherits from BaseRandomForest.
     """
@@ -431,7 +532,8 @@ class RandomForestRegressor(BaseRandomForest):
         return DecisionTreeRegressor(
             max_depth=self.max_depth,
             min_samples_split=self.min_samples_split,
-            n_features=self.n_features
+            n_features=self.n_features,
+            split_criterion=self.split_criterion,
         )
 
     def _aggregate_predictions(self, all_preds):
@@ -458,7 +560,7 @@ if __name__ == "__main__":
     X, y = data.data, data.target
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
 
-    clf = RandomForestClassifier(n_estimators=5, max_depth=5, min_samples_split=2,
+    clf = MyRandomForestClassifier(n_estimators=5, max_depth=5, min_samples_split=2,
                                  n_features=None, bagging=True, split_criterion="gini")
     clf.fit(X_train, y_train)
     y_pred = clf.predict(X_test)
@@ -470,9 +572,10 @@ if __name__ == "__main__":
     # -----------------------------------------
     boston = fetch_california_housing()
     X_b, y_b = boston.data, boston.target
+    print("California housing shape, ", X_b.shape)
     X_train_b, X_test_b, y_train_b, y_test_b = train_test_split(X_b, y_b, test_size=0.2)
 
-    rfr = RandomForestRegressor(n_estimators=5, max_depth=5, min_samples_split=2,
+    rfr = MyRandomForestRegressor(n_estimators=5, max_depth=5, min_samples_split=2,
                                 n_features=None, bagging=True, split_criterion="mse")
     rfr.fit(X_train_b, y_train_b)
     y_pred_b = rfr.predict(X_test_b)
